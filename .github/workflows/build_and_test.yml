@@ -1,0 +1,223 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build-and-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        compiler: [gcc, clang]
+        exclude:
+          - os: windows-latest
+            compiler: clang
+        include:
+          - os: windows-latest
+            compiler: msvc
+            compiler_name: "MSVC"
+          - os: ubuntu-latest
+            compiler: gcc
+            compiler_name: "GCC"
+          - os: ubuntu-latest
+            compiler: clang
+            compiler_name: "Clang"
+          - os: macos-latest
+            compiler: gcc
+            compiler_name: "GCC"
+          - os: macos-latest
+            compiler: clang
+            compiler_name: "Clang"
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up compiler
+      run: |
+        if [ "${{ matrix.compiler }}" = "gcc" ]; then
+          echo "CC=gcc" >> $GITHUB_ENV
+          echo "CXX=g++" >> $GITHUB_ENV
+        elif [ "${{ matrix.compiler }}" = "clang" ]; then
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "CXX=clang++" >> $GITHUB_ENV
+        fi
+      shell: bash
+
+    - name: Install dependencies (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential
+        sudo apt-get install -y clang
+        sudo apt-get install -y doxygen graphviz
+
+    - name: Install dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew update
+        brew install doxygen graphviz
+
+    - name: Install dependencies (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        choco install make
+        choco install doxygen.install
+        choco install graphviz
+
+    - name: Print compiler versions
+      run: |
+        echo "Using compiler: ${{ matrix.compiler_name }}"
+        $CC --version
+        $CXX --version
+        make --version
+
+    - name: Build static library
+      run: make static
+
+    - name: Build shared library
+      run: make shared
+
+    - name: Build debug version
+      run: make debug
+
+    - name: Run tests
+      run: make tests
+
+    - name: Generate documentation
+      run: make docs
+
+    - name: Test installation
+      run: |
+        make install PREFIX=./install_test
+        ls -la ./install_test/include/
+        ls -la ./install_test/lib/
+
+    - name: Test compilation with installed library
+      run: |
+        # Create a simple test program
+        cat > test_install.c << 'EOF'
+        #include <stdio.h>
+        #include <stdem.h>
+        
+        int main() {
+            StemError error;
+            EnumMap* map = stdem_create(5, sizeof(int), STEM_FLAGS_NONE, &error);
+            
+            if (map) {
+                printf("SUCCESS: Library installed correctly\n");
+                stdem_destroy(map);
+                return 0;
+            } else {
+                printf("FAILED: %s\n", stdem_error_string(error));
+                return 1;
+            }
+        }
+        EOF
+        
+        # Compile with installed library
+        gcc -I./install_test/include test_install.c -L./install_test/lib -lstdem -o test_install
+        ./test_install
+
+    - name: Run valgrind (Linux only)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get install -y valgrind
+        valgrind --leak-check=full --error-exitcode=1 ./build/test_stdem
+
+    - name: Run cppcheck static analysis
+      run: |
+        sudo apt-get install -y cppcheck
+        cppcheck --enable=all --error-exitcode=1 --suppress=missingIncludeSystem \
+          --inline-suppr include/ src/ tests/
+
+    - name: Check code formatting
+      run: |
+        # Check that there are no trailing whitespaces
+        ! git grep -l '[[:space:]]$' -- ':(exclude)*.md' ':(exclude)LICENSE'
+
+  cross-compilation-test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install ARM compiler
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi
+
+    - name: Cross-compile for ARM
+      run: |
+        CC=arm-linux-gnueabi-gcc make static
+        file build/libstdem.a
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential lcov
+
+    - name: Build with coverage flags
+      run: |
+        make clean
+        CFLAGS="-Iinclude -std=c99 -Wall -Wextra -pedantic -fPIC -g -O0 --coverage" \
+        make tests
+
+    - name: Generate coverage report
+      run: |
+        lcov --capture --directory . --output-file coverage.info
+        lcov --remove coverage.info '/usr/*' --output-file coverage.info
+        lcov --list coverage.info
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.info
+        flags: unittests
+        name: codecov-umbrella
+
+  package-check:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Check package structure
+      run: |
+        # Verify all necessary files are present
+        [ -f include/stdem.h ] || exit 1
+        [ -f src/stdem.c ] || exit 1
+        [ -f tests/test_stdem.c ] || exit 1
+        [ -f Makefile ] || exit 1
+        [ -f LICENSE ] || exit 1
+        [ -f README.md ] || exit 1
+        [ -f API.md ] || exit 1
+        [ -f USAGE.md ] || exit 1
+        [ -f INSTALL.md ] || exit 1
+        [ -f docs/Doxyfile ] || exit 1
+        echo "All required files are present"
+
+    - name: Verify license headers
+      run: |
+        # Check that all source files have license headers
+        for file in include/*.h src/*.c tests/*.c; do
+          if ! grep -q "LGPL-3.0-or-later" "$file"; then
+            echo "Missing license header in $file"
+            exit 1
+          fi
+        done
+        echo "All source files have proper license headers"
