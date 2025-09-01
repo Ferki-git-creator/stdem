@@ -17,7 +17,7 @@ Linux/macOS
 1. Clone or download the library
    ```bash
    git clone 
-https://github.com/Ferki-git-creator/stdem
+   https://github.com/Ferki-git-creator/stdem
    cd stdem
    ```
 2. Build the library
